@@ -2814,6 +2814,39 @@ collect_netconf() {
             IFS=',' read -r -a "${var?}" <<<"$(grep "$key=" <<<"$config" | cut -d= -f2 | sed 's/[{}\"]//g')"
         }
 
+        
+        sort_windows_routes_by_metric() {
+            local v=$1
+            local interfaces route route_metric id interface_metric effective_metric
+
+            interfaces=$(netsh int ipv$v show interfaces)
+
+            while read -r route; do
+                [ -z "$route" ] && continue
+
+                # netsh int ipv4/ipv6 show route:
+                # Publish Type Met Prefix Idx Gateway/Interface Name
+                route_metric=$(awk '{print $3}' <<<"$route")
+                id=$(awk '{print $5}' <<<"$route")
+
+                # netsh int ipv4/ipv6 show interfaces:
+                # Idx Met MTU State Name
+                interface_metric=$(
+                    awk -v id="$id" '$1 == id {print $2; exit}' <<<"$interfaces"
+                )
+
+                if is_digit "$route_metric" && is_digit "$interface_metric"; then
+                    effective_metric=$((route_metric + interface_metric))
+                else
+                    # Parsing failed: keep this route as a fallback candidate.
+                    effective_metric=2147483647
+                fi
+
+                printf '%d\t%s\n' "$effective_metric" "$route"
+            done |
+                sort -s -n -k1,1 |
+                cut -f2-
+        }
         # 部分机器精简了 powershell
         # 所以不要用 powershell 获取网络信息
         # ids=$(wmic nic where "PhysicalAdapter=true and MACAddress is not null and (PNPDeviceID like '%VEN_%&DEV_%' or PNPDeviceID like '%{F8615163-DF3E-46C5-913F-F2D2F965ED0E}%')" get InterfaceIndex | sed '1d')
@@ -2846,9 +2879,17 @@ collect_netconf() {
         for v in 4 6; do
             if [ "$v" = 4 ]; then
                 # 或者 route print
-                routes=$(netsh int ipv4 show route | awk '$4 == "0.0.0.0/0"')
+                routes=$(
+                    netsh int ipv4 show route |
+                        awk '$4 == "0.0.0.0/0"' |
+                        sort_windows_routes_by_metric "$v"
+                )
             else
-                routes=$(netsh int ipv6 show route | awk '$4 == "::/0"')
+                routes=$(
+                    netsh int ipv6 show route |
+                        awk '$4 == "::/0"' |
+                        sort_windows_routes_by_metric "$v"
+                )
             fi
 
             if [ -z "$routes" ]; then
